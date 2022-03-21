@@ -234,15 +234,58 @@ void test_v6_send_recv(void)
 	k_sleep(TCP_TEARDOWN_TIMEOUT);
 }
 
-void test_v4_sendto_recvfrom(void)
+/* Test the stack behavior with a resonable sized block data */
+#define TEST_BLOCK_SIZE 6000
+
+static uint8_t testBlockTcp[TEST_BLOCK_SIZE];
+static uint8_t testBlockTcpRx[TEST_BLOCK_SIZE + 10];
+
+#define TCP_SERVER_STACK_SIZE 4096
+
+K_THREAD_STACK_DEFINE(tcp_server_stack_area, TCP_SERVER_STACK_SIZE);
+struct k_thread tcp_server_thread_data;
+
+/* a thread that receives, while the other part transmits */
+void tcp_server_block_thread(void* vps_sock, void* unused2, void* unused3) {
+	int new_sock;
+	struct sockaddr addr;
+	int* ps_sock = (int*)vps_sock;
+	socklen_t addrlen = sizeof(addr);
+
+	test_accept(*ps_sock, &new_sock, &addr, &addrlen);
+	zassert_equal(addrlen, sizeof(struct sockaddr_in), "wrong addrlen");
+
+	/* check the received data */
+	ssize_t recved = 0;
+	ssize_t total_received = 0;
+	int iteration = 0;
+	while (total_received < TEST_BLOCK_SIZE) {
+		recved = recv(new_sock, testBlockTcpRx + total_received, sizeof(testBlockTcpRx) - total_received, 0);
+		
+		zassert(recved > 0, "received bigger then 0",
+			"Error receiving bytes %i bytes, got %i on top of %i in iteration %i, errno %i", TEST_BLOCK_SIZE,
+			recved, total_received, iteration, errno);
+		total_received += recved;
+		iteration++;
+	}
+	zassert_equal(memcmp(testBlockTcpRx, testBlockTcp, sizeof(testBlockTcp)),
+		0,
+		"unexpected data");
+	
+	test_close(new_sock);
+}
+
+void test_v4_send_recv_block(void)
 {
 	int c_sock;
 	int s_sock;
-	int new_sock;
 	struct sockaddr_in c_saddr;
 	struct sockaddr_in s_saddr;
-	struct sockaddr addr;
-	socklen_t addrlen = sizeof(addr);
+
+	/* initialize the test block with easily debuggable data */
+	for (uint32_t i=0; i<TEST_BLOCK_SIZE; i++) {
+	    testBlockTcp[i] = (uint8_t)(i & 0xff);
+	}
 
 	prepare_sock_tcp_v4(CONFIG_NET_CONFIG_MY_IPV4_ADDR, ANY_PORT,
 			    &c_sock, &c_saddr);
@@ -252,20 +295,34 @@ void test_v4_sendto_recvfrom(void)
 	test_bind(s_sock, (struct sockaddr *)&s_saddr, sizeof(s_saddr));
 	test_listen(s_sock);
 
+	(void)k_thread_create(&tcp_server_thread_data, tcp_server_stack_area,
+	                                 K_THREAD_STACK_SIZEOF(tcp_server_stack_area),
+	                                 tcp_server_block_thread,
+	                                 &s_sock, NULL, NULL,
+	                                 k_thread_priority_get( k_current_get()), 0, K_NO_WAIT);
+
 	test_connect(c_sock, (struct sockaddr *)&s_saddr, sizeof(s_saddr));
-	test_sendto(c_sock, TEST_STR_SMALL, strlen(TEST_STR_SMALL), 0,
-		    (struct sockaddr *)&s_saddr, sizeof(s_saddr));
+	LOG_ERR("Test this log message");
 
-	test_accept(s_sock, &new_sock, &addr, &addrlen);
-	zassert_equal(addrlen, sizeof(struct sockaddr_in), "wrong addrlen");
+	/* This will certainly fail because the send allows only a limited chunk to be transmitted */
+	//test_send(c_sock, testBlockTcp, sizeof(testBlockTcp), 0);
 
-	test_recvfrom(new_sock, MSG_PEEK, &addr, &addrlen);
-	zassert_equal(addrlen, sizeof(struct sockaddr_in), "wrong addrlen");
+	/* send piece by piece */
+	ssize_t total_send = 0;
+	int iteration = 0;
+	while (total_send < TEST_BLOCK_SIZE) {
+		int send_bytes = send(c_sock, testBlockTcp + total_send, TEST_BLOCK_SIZE - total_send, 0);
+		zassert(send_bytes > 0, "send_bytes bigger then 0",
+			"Error sending %i bytes on top of %i, got %i in iteration %i, errno %i", TEST_BLOCK_SIZE - total_send,
+			total_send, send_bytes, iteration, errno);
+		total_send += send_bytes;
+		iteration++;
+	}
 
-	test_recvfrom(new_sock, 0, &addr, &addrlen);
-	zassert_equal(addrlen, sizeof(struct sockaddr_in), "wrong addrlen");
+	/* join the thread, to wait for the receiving part */ 
+	zassert_equal( k_thread_join(&tcp_server_thread_data, K_SECONDS(60)), 0,
+	        "Not succesfully wait for TCP thread to finish");
 
-	test_close(new_sock);
 	test_close(s_sock);
 	test_close(c_sock);
 
@@ -1057,25 +1114,26 @@ void test_main(void)
 
 	ztest_test_suite(
 		socket_tcp,
-		ztest_user_unit_test(test_v4_send_recv),
-		ztest_user_unit_test(test_v6_send_recv),
-		ztest_user_unit_test(test_v4_sendto_recvfrom),
-		ztest_user_unit_test(test_v6_sendto_recvfrom),
-		ztest_user_unit_test(test_v4_sendto_recvfrom_null_dest),
-		ztest_user_unit_test(test_v6_sendto_recvfrom_null_dest),
-		ztest_user_unit_test(test_v4_recv_enotconn),
-		ztest_user_unit_test(test_v6_recv_enotconn),
-		ztest_user_unit_test(test_shutdown_rd_synchronous),
-		ztest_unit_test(test_shutdown_rd_while_recv),
-		ztest_unit_test(test_open_close_immediately),
-		ztest_user_unit_test(test_v4_accept_timeout),
-		ztest_unit_test(test_so_type),
-		ztest_unit_test(test_so_protocol),
-		ztest_unit_test(test_v4_so_rcvtimeo),
-		ztest_unit_test(test_v6_so_rcvtimeo),
-		ztest_unit_test(test_v4_msg_waitall),
-		ztest_unit_test(test_v6_msg_waitall),
-		ztest_user_unit_test(test_socket_permission)
+//		ztest_user_unit_test(test_v4_send_recv),
+//		ztest_user_unit_test(test_v6_send_recv),
+		ztest_user_unit_test(test_v4_send_recv_block)
+//      ztest_user_unit_test(test_v4_sendto_recvfrom),
+//		ztest_user_unit_test(test_v6_sendto_recvfrom),
+//		ztest_user_unit_test(test_v4_sendto_recvfrom_null_dest),
+//		ztest_user_unit_test(test_v6_sendto_recvfrom_null_dest),
+//		ztest_user_unit_test(test_v4_recv_enotconn),
+//		ztest_user_unit_test(test_v6_recv_enotconn),
+//		ztest_user_unit_test(test_shutdown_rd_synchronous),
+//		ztest_unit_test(test_shutdown_rd_while_recv),
+//		ztest_unit_test(test_open_close_immediately),
+//		ztest_user_unit_test(test_v4_accept_timeout),
+//		ztest_unit_test(test_so_type),
+//		ztest_unit_test(test_so_protocol),
+//		ztest_unit_test(test_v4_so_rcvtimeo),
+//		ztest_unit_test(test_v6_so_rcvtimeo),
+//		ztest_unit_test(test_v4_msg_waitall),
+//		ztest_unit_test(test_v6_msg_waitall),
+//		ztest_user_unit_test(test_socket_permission)
 		);
 
 	ztest_run_test_suite(socket_tcp);
