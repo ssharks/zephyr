@@ -354,14 +354,14 @@ void test_v4_send_recv_large(void)
 }
 
 /* Control the packet drop ratio at the loopback adapter 8 */
-static void set_packet_loss_ratio(void)
+void set_packet_loss_ratio(void)
 {
 	/* drop one every 8 packets */
 	zassert_equal(loopback_set_packet_drop_ratio(0.125f), 0,
 		"Error setting packet drop rate");
 }
 
-static void restore_packet_loss_ratio(void)
+void restore_packet_loss_ratio(void)
 {
 	/* no packet dropping any more */
 	zassert_equal(loopback_set_packet_drop_ratio(0.0f), 0,
@@ -1271,7 +1271,7 @@ void test_main(void)
 
 	ztest_test_suite(
 		socket_tcp,
-		ztest_user_unit_test(test_v4_send_recv),
+/*		ztest_user_unit_test(test_v4_send_recv),
 		ztest_user_unit_test(test_v6_send_recv),
 		ztest_user_unit_test(test_v4_sendto_recvfrom),
 		ztest_user_unit_test(test_v6_sendto_recvfrom),
@@ -1291,10 +1291,10 @@ void test_main(void)
 		ztest_unit_test(test_v6_so_rcvtimeo),
 		ztest_unit_test(test_v4_msg_waitall),
 		ztest_unit_test(test_v6_msg_waitall),
-		ztest_user_unit_test(test_socket_permission),
-		ztest_unit_test(test_v4_send_recv_large),
+		ztest_user_unit_test(test_socket_permission),*/
+		ztest_unit_test(test_v4_send_recv_large)/*,
 		ztest_unit_test_setup_teardown(test_v4_send_recv_large,
-			set_packet_loss_ratio, restore_packet_loss_ratio)
+			set_packet_loss_ratio, restore_packet_loss_ratio)*/
 		);
 
 	ztest_run_test_suite(socket_tcp);
