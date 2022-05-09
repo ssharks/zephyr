@@ -645,7 +645,7 @@ static inline int z_vrfy_zsock_accept(int sock, struct sockaddr *addr,
 #include <syscalls/zsock_accept_mrsh.c>
 #endif /* CONFIG_USERSPACE */
 
-#define WAIT_BUFS K_MSEC(100)
+#define INITIAL_WAIT_BUFS K_MSEC(10)
 #define MAX_WAIT_BUFS K_SECONDS(10)
 
 ssize_t zsock_sendto_ctx(struct net_context *ctx, const void *buf, size_t len,
@@ -655,6 +655,7 @@ ssize_t zsock_sendto_ctx(struct net_context *ctx, const void *buf, size_t len,
 	k_timeout_t timeout = K_FOREVER;
 	uint64_t buf_timeout = 0;
 	int status;
+	k_timeout_t retry_timemout = INITIAL_WAIT_BUFS;
 
 	if ((flags & ZSOCK_MSG_DONTWAIT) || sock_is_nonblock(ctx)) {
 		timeout = K_NO_WAIT;
@@ -705,7 +706,11 @@ ssize_t zsock_sendto_ctx(struct net_context *ctx, const void *buf, size_t len,
 					return -1;
 				}
 
-				k_sleep(WAIT_BUFS);
+				/* Avoid waiting too long when the  buf_timeout */
+				retry_timemout.ticks = MIN(retry_timemout.ticks, remaining);
+				k_sleep(retry_timemout);
+				/* Make the timeout grow exponentially */
+				retry_timemout.ticks = retry_timemout.ticks * 2;
 				continue;
 			} else {
 				errno = -status;
@@ -751,6 +756,7 @@ ssize_t zsock_sendmsg_ctx(struct net_context *ctx, const struct msghdr *msg,
 	k_timeout_t timeout = K_FOREVER;
 	uint64_t buf_timeout = 0;
 	int status;
+	k_timeout_t retry_timemout = INITIAL_WAIT_BUFS;
 
 	if ((flags & ZSOCK_MSG_DONTWAIT) || sock_is_nonblock(ctx)) {
 		timeout = K_NO_WAIT;
@@ -783,7 +789,11 @@ ssize_t zsock_sendmsg_ctx(struct net_context *ctx, const struct msghdr *msg,
 					return -1;
 				}
 
-				k_sleep(WAIT_BUFS);
+				/* Avoid waiting too long when the  buf_timeout */
+				retry_timemout.ticks = MIN(retry_timemout.ticks, remaining);
+				k_sleep(retry_timemout);
+				/* Make the timeout grow exponentially */
+				retry_timemout.ticks = retry_timemout.ticks * 2;
 				continue;
 			} else {
 				errno = -status;
