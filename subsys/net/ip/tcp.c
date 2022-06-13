@@ -53,6 +53,8 @@ static K_KERNEL_STACK_DEFINE(work_q_stack, CONFIG_NET_TCP_WORKQ_STACK_SIZE);
 
 static void tcp_in(struct tcp *conn, struct net_pkt *pkt);
 static bool is_destination_local(struct net_pkt *pkt);
+static int tcp_out_ext(struct tcp *conn, uint8_t flags, struct net_pkt *data,
+		       uint32_t seq);
 
 int (*tcp_send_cb)(struct net_pkt *pkt) = NULL;
 size_t (*tcp_recv_cb)(struct tcp *conn, struct net_pkt *pkt) = NULL;
@@ -704,10 +706,21 @@ end:
 static int tcp_update_recv_wnd(struct tcp *conn, int32_t delta)
 {
 	int32_t new_win;
+	int32_t update_thres = MIN(conn_mss(conn), tcp_window/2);
 
 	new_win = conn->recv_win + delta;
 	if (new_win < 0 || new_win > UINT16_MAX) {
 		return -EINVAL;
+	}
+	/* Send out a window update based on David Clark's algorithm
+	 * TODO: incorporate the receive window option
+	 */
+	if ((new_win > update_thres) && (conn->recv_win <= update_thres)) {
+		k_mutex_lock(&conn->lock, K_FOREVER);
+
+		(void)tcp_out_ext(conn, ACK, NULL, conn->seq - 1);
+		
+		k_mutex_unlock(&conn->lock);
 	}
 
 	conn->recv_win = new_win;
