@@ -268,6 +268,9 @@ struct tcp { /* TCP connection */
 	uint16_t recv_win;
 	uint16_t send_win;
 	uint8_t send_data_retries;
+#ifdef CONFIG_NET_TCP_FAST_RETRANSMIT
+	uint8_t dup_ack_cnt;
+#endif
 	bool in_retransmission : 1;
 	bool in_connect : 1;
 	bool in_close : 1;
