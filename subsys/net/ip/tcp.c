@@ -751,16 +751,17 @@ static size_t tcp_check_pending_data(struct tcp *conn, struct net_pkt *pkt,
 		struct tcphdr *th = th_get(pkt);
 		uint32_t expected_seq = th_seq(th) + len;
 		uint32_t pending_seq;
-		uint32_t offset;
+		uint32_t start_offset;
+		uint32_t end_offset;
 
 		pending_seq = tcp_get_seq(conn->queue_recv_data->buffer);
-		offset = expected_seq - pending_seq;
+		start_offset = pending_seq - th_seq(th);
+		end_offset = expected_seq - pending_seq;
 		pending_len = net_pkt_get_len(conn->queue_recv_data);
-		if (offset < pending_len) {
-			if (offset) {
-				net_buf_pull_mem(conn->queue_recv_data->buffer, offset);
+		if (end_offset < pending_len) {
+			if (end_offset) {
+				net_buf_pull_mem(conn->queue_recv_data->buffer, end_offset);
 			}
-			pending_len -= offset;
 
 			NET_DBG("Found pending data seq %u len %zd",
 				expected_seq, pending_len);
@@ -770,6 +771,14 @@ static size_t tcp_check_pending_data(struct tcp *conn, struct net_pkt *pkt,
 			conn->queue_recv_data->buffer = NULL;
 
 			k_work_cancel_delayable(&conn->recv_queue_timer);
+		} else {
+			/* Check if the queued data is just a section of the incomming data */
+			if (start_offset < len) {
+				net_buf_unref(conn->queue_recv_data->buffer);
+				conn->queue_recv_data->buffer = NULL;
+			}
+
+			pending_len = 0;
 		}
 	}
 
@@ -1775,17 +1784,18 @@ static void tcp_queue_recv_data(struct tcp *conn, struct net_pkt *pkt,
 		 * would not be sequential, then drop this packet.
 		 */
 		uint32_t pending_seq;
-		uint32_t offset;
+		uint32_t start_offset;
+		uint32_t end_offset;
 		size_t pending_len;
 
 		pending_seq = tcp_get_seq(conn->queue_recv_data->buffer);
-		offset = seq - pending_seq;
+		end_offset = seq - pending_seq;
 		pending_len = net_pkt_get_len(conn->queue_recv_data);
-		if (offset < pending_len) {
-			if (offset) {
-				net_buf_pull_mem(conn->queue_recv_data->buffer, offset);
+		if (end_offset < pending_len) {
+			if (end_offset) {
+				net_buf_pull_mem(conn->queue_recv_data->buffer, end_offset);
 			}
-			pending_len -= offset;
+
 			/* Put new data before the pending data */
 			net_buf_frag_add(pkt->buffer,
 					 conn->queue_recv_data->buffer);
@@ -1796,17 +1806,28 @@ static void tcp_queue_recv_data(struct tcp *conn, struct net_pkt *pkt,
 
 			last = net_buf_frag_last(conn->queue_recv_data->buffer);
 			pending_seq = tcp_get_seq(last);
+
+			start_offset = pending_seq - seq_start;
 			/* Compute the offset w.r.t. the start point of the new packet */
-			offset = (pending_seq + last->len) - seq_start;
+			end_offset = (pending_seq + last->len) - seq_start;
 
-			if (offset < len) {
-				if (offset) {
-					net_buf_pull_mem(pkt->buffer, offset);
-				}
-
-				/* Put new data after pending data */
-				last->frags = pkt->buffer;
+			/* Check if queue start with within the within the new packet */
+			if ((start_offset < len) && (end_offset <= len)) {
+				/* The queued data is irrelevant since the new packet overlaps the
+				 * new packet, take the new packet as contents */
+				net_buf_unref(conn->queue_recv_data->buffer);
+				conn->queue_recv_data->buffer = pkt->buffer;
 				inserted = true;
+			} else {
+				if (end_offset < len) {
+					if (end_offset) {
+						net_buf_pull_mem(pkt->buffer, end_offset);
+					}
+
+					/* Put new data after pending data */
+					last->frags = pkt->buffer;
+					inserted = true;
+				}
 			}
 		}
 

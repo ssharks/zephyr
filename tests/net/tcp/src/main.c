@@ -1381,9 +1381,19 @@ static struct out_of_order_check_struct out_of_order_check_list[] = {
 	{ 20, 12, 0, 0},
 	{ 10, 10, 0, 0},
 	{ 0,  10, 40, 0}, /* First sequence complete */
-	{ 60, 12, 40, 0},
-	{ 70, 10, 40, 0},
-	{ 40, 25, 80, 0}, /* Some bigger data */
+	{ 50,  6, 40, 0},
+	{ 55,  5, 40, 0},
+	{ 40, 10, 60, 0}, /* Some bigger data */
+	{ 61,  2, 60, 0},
+	{ 60,  5, 65, 0}, /* Over lapped incomming packet */
+	{ 66,  4, 65, 0},
+	{ 65,  5, 70, 0}, /* Over lapped incomming packet, at boundary */
+	{ 72,  2, 70, 0},
+	{ 71,  4, 70, 0},
+	{ 70,  1, 75, 0}, /* Over lapped in out of order processing */
+	{ 78,  2, 75, 0},
+	{ 77,  3, 75, 0},
+	{ 75,  2, 80, 0}, /* Over lapped in out of order processing, at boundary */
 };
 
 static void tcp_recv_di_cb(struct net_context *context,
@@ -1472,13 +1482,6 @@ static void checklist_based_out_of_order_test(struct out_of_order_check_struct *
 			k_sleep(K_MSEC(check_ptr->delay_ms));
 		}
 	}
-
-	/* Check if all data was received */
-	/*if (data_integrity_struct.offset != check_list[num_checks-1].ack_offset) {
-		zassert_true(false, "Not all data received, got %i bytes, expected %i bytes",
-			     data_integrity_struct.offset,
-			     check_list[num_checks-1].ack_offset);
-	}*/
 }
 
 static void test_server_recv_out_of_order_data(void)
