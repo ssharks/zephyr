@@ -1371,6 +1371,11 @@ struct out_of_order_check_struct {
 	int delay_ms;
 };
 
+struct out_of_order_data_integrity_struct {
+	const uint8_t *data;
+	int offset;
+};
+
 static struct out_of_order_check_struct out_of_order_check_list[] = {
 	{ 30, 10, 0, 0}, /* First packet will be out-of-order */
 	{ 20, 12, 0, 0},
@@ -1381,6 +1386,46 @@ static struct out_of_order_check_struct out_of_order_check_list[] = {
 	{ 40, 25, 80, 0}, /* Some bigger data */
 };
 
+static void tcp_recv_di_cb(struct net_context *context,
+			     struct net_pkt *pkt,
+			     union net_ip_header *ip_hdr,
+			     union net_proto_header *proto_hdr,
+			     int status,
+			     void *user_data)
+{
+	struct out_of_order_data_integrity_struct *data_integrity_struct =
+		(struct out_of_order_data_integrity_struct *)user_data;
+
+	if (data_integrity_struct == NULL) {
+		zassert_true(false, "Invalid data integrity struct");
+	}
+	if (data_integrity_struct->data == NULL) {
+		zassert_true(false, "Invalid data pointer");
+	}
+
+	int ret;
+	uint8_t recv_buf[MAX_DATA];
+
+	if (pkt != NULL) {
+		/* Read the packet contents and validate against the input */
+		ret = net_pkt_read(pkt, recv_buf, MAX_DATA);
+		if (ret < 0) {
+			zassert_true(false, "failed to recv the data");
+		}
+
+		if (ret > 0) {
+			if (memcmp(recv_buf,
+				   data_integrity_struct->data + data_integrity_struct->offset,
+				   ret) == 0) {
+				zassert_true(false, "Data integrity error at %i",
+					     data_integrity_struct->offset);
+			}
+
+			data_integrity_struct->offset += ret;
+		}
+	}
+}
+
 static void checklist_based_out_of_order_test(struct out_of_order_check_struct *check_list,
 					      int num_checks, int sequence_base)
 {
@@ -1388,6 +1433,15 @@ static void checklist_based_out_of_order_test(struct out_of_order_check_struct *
 	struct net_pkt *pkt;
 	int ret, i;
 	struct out_of_order_check_struct *check_ptr;
+	struct out_of_order_data_integrity_struct data_integrity_struct;
+
+	data_integrity_struct.data = data;
+	data_integrity_struct.offset = 0;
+
+	ret = net_context_recv(ooo_ctx, tcp_recv_di_cb, K_NO_WAIT, &data_integrity_struct);
+	if (ret < 0) {
+		zassert_true(false, "Failed to recv data from peer");
+	}
 
 	for (i = 0; i < num_checks; i++) {
 		check_ptr = &check_list[i];
@@ -1415,6 +1469,12 @@ static void checklist_based_out_of_order_test(struct out_of_order_check_struct *
 		if (check_ptr->delay_ms) {
 			k_sleep(K_MSEC(check_ptr->delay_ms));
 		}
+	}
+
+	/* Check if all data was received */
+	if (data_integrity_struct.offset != check_list[num_checks].ack_offset) {
+		zassert_true(false, "Not all data received, got %i bytes",
+			     data_integrity_struct.offset);
 	}
 }
 
