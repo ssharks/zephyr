@@ -223,6 +223,20 @@ struct tcp_options {
 	bool wnd_found : 1;
 };
 
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+
+enum tcp_new_reno_state {
+	TCP_NEW_RENO_RAMPUP = 1,
+	TCP_NEW_RENO_LINEAR
+};
+
+struct tcp_collision_avoidance_reno {
+	uint16_t congestion_win;
+	uint16_t ssthresh;
+	enum tcp_new_reno_state state;
+};
+#endif
+
 struct tcp { /* TCP connection */
 	sys_snode_t next;
 	struct net_context *context;
@@ -273,6 +287,9 @@ struct tcp { /* TCP connection */
 	uint16_t send_win;
 #ifdef CONFIG_NET_TCP_RANDOMIZED_RTO
 	uint16_t rto;
+#endif
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+	struct tcp_collision_avoidance_reno ca;
 #endif
 	uint8_t send_data_retries;
 #ifdef CONFIG_NET_TCP_FAST_RETRANSMIT

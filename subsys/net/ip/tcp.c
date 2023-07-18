@@ -62,6 +62,10 @@ static int tcp_tx_window =
 #define TCP_RTO_MS (tcp_rto)
 #endif
 
+/* Define the number of MSS sections the congestion window is initialized at */
+#define TCP_CONGESTION_INITIAL_WIN 1
+#define TCP_CONGESTION_INITIAL_SSTHRESH 3
+
 static sys_slist_t tcp_conns = SYS_SLIST_STATIC_INIT(&tcp_conns);
 
 static K_MUTEX_DEFINE(tcp_lock);
@@ -391,6 +395,47 @@ static void tcp_derive_rto(struct tcp *conn)
 	ARG_UNUSED(conn);
 #endif
 }
+
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+static void tcp_new_reno_init(struct tcp *conn)
+{
+	conn->ca.congestion_win = conn_mss(conn) * TCP_CONGESTION_INITIAL_WIN;
+	conn->ca.ssthresh = conn_mss(conn) * TCP_CONGESTION_INITIAL_SSTHRESH;
+	conn->ca.state = TCP_NEW_RENO_RAMPUP;
+}
+
+static void tcp_new_reno_fast_retransmit(struct tcp *conn)
+{
+	conn->ca.congestion_win = MAX(conn_mss(conn), conn->ca.congestion_win / 2);
+	conn->ca.ssthresh = MAX(conn_mss(conn) * 2, conn->ca.congestion_win);
+	conn->ca.state = TCP_NEW_RENO_LINEAR;
+}
+
+static void tcp_new_reno_timeout(struct tcp *conn)
+{
+	conn->ca.ssthresh = conn->ca.congestion_win / 2;
+	conn->ca.congestion_win = conn_mss(conn) * TCP_CONGESTION_INITIAL_WIN;
+	conn->ca.state = TCP_NEW_RENO_RAMPUP;
+}
+
+static void tcp_new_reno_pkts_acked(struct tcp *conn)
+{
+	int32_t new_win = conn->ca.congestion_win;
+
+	if (conn->ca.state == TCP_NEW_RENO_RAMPUP) {
+		new_win += conn_mss(conn);
+		conn->ca.congestion_win += conn_mss(conn);
+	} else {
+		int32_t mss = conn_mss(conn);
+
+		new_win += (mss * mss) / conn->ca.congestion_win;
+	}
+	conn->ca.congestion_win = MIN(new_win, UINT16_MAX);
+	if (conn->ca.congestion_win > conn->ca.ssthresh) {
+		conn->ca.state = TCP_NEW_RENO_LINEAR;
+	}
+}
+#endif
 
 static void tcp_send_queue_flush(struct tcp *conn)
 {
@@ -1140,6 +1185,9 @@ static int tcp_pkt_peek(struct net_pkt *to, struct net_pkt *from, size_t pos,
 static bool tcp_window_full(struct tcp *conn)
 {
 	bool window_full = (conn->send_data_total >= conn->send_win);
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+	window_full = window_full || (conn->send_data_total >= conn->ca.congestion_win);
+#endif
 
 	NET_DBG("conn: %p window_full=%hu", conn, window_full);
 
@@ -1162,6 +1210,13 @@ static int tcp_unsent_len(struct tcp *conn)
 		unsent_len = 0;
 	} else {
 		unsent_len = MIN(unsent_len, conn->send_win - conn->unacked_len);
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+		if (conn->unacked_len >= conn->ca.congestion_win) {
+			unsent_len = 0;
+		} else {
+			unsent_len = MIN(unsent_len, conn->ca.congestion_win - conn->unacked_len);
+		}
+#endif
 	}
  out:
 	NET_DBG("unsent_len=%d", unsent_len);
@@ -1175,9 +1230,11 @@ static int tcp_send_data(struct tcp *conn)
 	int len;
 	struct net_pkt *pkt;
 
-	len = MIN3(conn->send_data_total - conn->unacked_len,
-		   conn->send_win - conn->unacked_len,
-		   conn_mss(conn));
+	len = MIN(tcp_unsent_len(conn), conn_mss(conn));
+	if (len < 0) {
+		ret = len;
+		goto out;
+	}
 	if (len == 0) {
 		NET_DBG("conn: %p no data to send", conn);
 		ret = -ENODATA;
@@ -1305,6 +1362,15 @@ static void tcp_resend_data(struct k_work *work)
 		conn_unref = true;
 		goto out;
 	}
+
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+	if (conn->send_data_retries == 0) {
+		tcp_new_reno_timeout(conn);
+		if (tcp_window_full(conn)) {
+			(void)k_sem_take(&conn->tx_sem, K_NO_WAIT);
+		}
+	}
+#endif
 
 	conn->data_mode = TCP_DATA_MODE_RESEND;
 	conn->unacked_len = 0;
@@ -1484,6 +1550,12 @@ static struct tcp *tcp_conn_alloc(void)
 	conn->tcp_nodelay = false;
 #ifdef CONFIG_NET_TCP_FAST_RETRANSMIT
 	conn->dup_ack_cnt = 0;
+#endif
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+	/* Initially set the congestion window at its max size, since only the MSS
+	 * is available as soon as the connection is established
+	 */
+	conn->ca.congestion_win = UINT16_MAX;
 #endif
 
 	/* The ISN value will be set when we get the connection attempt or
@@ -2225,6 +2297,10 @@ next_state:
 				conn->accepted_conn = NULL;
 			}
 
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+			tcp_new_reno_init(conn);
+#endif
+
 			if (len) {
 				verdict = tcp_data_get(conn, pkt, &len);
 				if (verdict == NET_OK) {
@@ -2263,6 +2339,9 @@ next_state:
 			tcp_conn_ref(conn);
 			net_context_set_state(conn->context,
 					      NET_CONTEXT_CONNECTED);
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+			tcp_new_reno_init(conn);
+#endif
 			tcp_out(conn, ACK);
 
 			/* The connection semaphore is released *after*
@@ -2340,6 +2419,13 @@ next_state:
 
 				/* Restore the current transmission */
 				conn->unacked_len = temp_unacked_len;
+
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+				tcp_new_reno_fast_retransmit(conn);
+				if (tcp_window_full(conn)) {
+					(void)k_sem_take(&conn->tx_sem, K_NO_WAIT);
+				}
+#endif
 			}
 		}
 #endif
@@ -2365,6 +2451,9 @@ next_state:
 #ifdef CONFIG_NET_TCP_FAST_RETRANSMIT
 			/* New segment, reset duplicate ack counter */
 			conn->dup_ack_cnt = 0;
+#endif
+#ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+			tcp_new_reno_pkts_acked(conn);
 #endif
 
 			conn->send_data_total -= len_acked;
