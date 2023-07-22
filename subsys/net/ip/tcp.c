@@ -397,11 +397,20 @@ static void tcp_derive_rto(struct tcp *conn)
 }
 
 #ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
+
+static void tcp_new_reno_log(struct tcp *conn, char *step)
+{
+	NET_DBG("conn: %p, ca %s, win=%d, ssthres=%d, state=%s",
+		conn, step, conn->ca.congestion_win, conn->ca.ssthresh,
+		TCP_NEW_RENO_STATE_STR(conn->ca.state));
+}
+
 static void tcp_new_reno_init(struct tcp *conn)
 {
 	conn->ca.congestion_win = conn_mss(conn) * TCP_CONGESTION_INITIAL_WIN;
 	conn->ca.ssthresh = conn_mss(conn) * TCP_CONGESTION_INITIAL_SSTHRESH;
 	conn->ca.state = TCP_NEW_RENO_RAMPUP;
+	tcp_new_reno_log(conn, "init");
 }
 
 static void tcp_new_reno_fast_retransmit(struct tcp *conn)
@@ -409,6 +418,7 @@ static void tcp_new_reno_fast_retransmit(struct tcp *conn)
 	conn->ca.congestion_win = MAX(conn_mss(conn), conn->ca.congestion_win / 2);
 	conn->ca.ssthresh = MAX(conn_mss(conn) * 2, conn->ca.congestion_win);
 	conn->ca.state = TCP_NEW_RENO_LINEAR;
+	tcp_new_reno_log(conn, "fast_retransmit");
 }
 
 static void tcp_new_reno_timeout(struct tcp *conn)
@@ -416,6 +426,7 @@ static void tcp_new_reno_timeout(struct tcp *conn)
 	conn->ca.ssthresh = conn->ca.congestion_win / 2;
 	conn->ca.congestion_win = conn_mss(conn) * TCP_CONGESTION_INITIAL_WIN;
 	conn->ca.state = TCP_NEW_RENO_RAMPUP;
+	tcp_new_reno_log(conn, "timeout");
 }
 
 static void tcp_new_reno_pkts_acked(struct tcp *conn)
@@ -434,6 +445,7 @@ static void tcp_new_reno_pkts_acked(struct tcp *conn)
 	if (conn->ca.congestion_win > conn->ca.ssthresh) {
 		conn->ca.state = TCP_NEW_RENO_LINEAR;
 	}
+	tcp_new_reno_log(conn, "pkts_acked");
 }
 #endif
 

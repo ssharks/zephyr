@@ -230,6 +230,8 @@ enum tcp_new_reno_state {
 	TCP_NEW_RENO_LINEAR
 };
 
+#define TCP_NEW_RENO_STATE_STR(x) (((x) == TCP_NEW_RENO_RAMPUP) ? "ramp-up" : "linear")
+
 struct tcp_collision_avoidance_reno {
 	uint16_t congestion_win;
 	uint16_t ssthresh;
