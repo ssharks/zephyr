@@ -225,17 +225,10 @@ struct tcp_options {
 
 #ifdef CONFIG_NET_TCP_CONGESTION_AVOIDANCE
 
-enum tcp_new_reno_state {
-	TCP_NEW_RENO_RAMPUP = 1,
-	TCP_NEW_RENO_LINEAR
-};
-
-#define TCP_NEW_RENO_STATE_STR(x) (((x) == TCP_NEW_RENO_RAMPUP) ? "ramp-up" : "linear")
-
 struct tcp_collision_avoidance_reno {
-	uint16_t congestion_win;
+	uint16_t cwnd;
 	uint16_t ssthresh;
-	enum tcp_new_reno_state state;
+	uint16_t pending_fast_retransmit_bytes;
 };
 #endif
 
