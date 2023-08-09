@@ -2639,75 +2639,64 @@ next_state:
 	case TCP_CLOSED:
 		break;
 	case TCP_FIN_WAIT_1:
+	case TCP_FIN_WAIT_2:
+	case TCP_CLOSING:
 		if (th) {
 			/* Acknowledge but drop any new data */
+			int32_t new_len = 0;
 			if (len > 0) {
-				int32_t new_len = len - net_tcp_seq_cmp(conn->ack, th_seq(th));
-				/* Cases:
-				 * - Data already received earlier: len > 0 , new_len <= 0
-				 * - Partially new data len > 0, new_len > 0
-				 * - Out of order data len > 0, new_len > 0, ignore the data in
-				 *   between
-				 */
-				if (new_len > 0) {
-					conn_ack(conn, + new_len);
+				new_len = len - net_tcp_seq_cmp(conn->ack, th_seq(th));
+				if (conn->state == TCP_CLOSING) {
+					/* FIN has already been acknowledged, which is part of the
+					 * ACK so add one to new len
+					 */
+					new_len++;
 				}
 			}
 
 			/*
-			 * Only if our FIN flag has been acknowledged and all the data has been
-			 * received, it can go to the TIME_WAIT state
+			 * FIN1:
+			 * Acknowledge path and sequence path are independent, treat them that way
+			 * The for combinations and their destination states
+			 * -   & -   -> TCP_FIN_WAIT_1
+			 * FIN & -   -> TCP_CLOSING
+			 * -   & ACK -> TCP_FIN_WAIT_2
+			 * FIN & ACK -> TCP_TIME_WAIT
 			 */
-			if (FL(&fl, ==, (FIN | ACK),
-			    (th_ack(th) == conn->seq) && (th_seq(th) == conn->ack))) {
-				tcp_send_timer_cancel(conn);
-				conn_ack(conn, + 1);
-				tcp_out(conn, ACK);
-				next = TCP_TIME_WAIT;
-				NET_DBG("FIN acknowledged, going to TIME_WAIT_STATE");
-				verdict = NET_OK;
-			} else if (th &&
-				   (FL(&fl, ==, FIN, th_seq(th) == conn->ack) ||
-				    FL(&fl, ==, (FIN | ACK), th_seq(th) == conn->ack))) {
-				tcp_send_timer_cancel(conn);
-				conn_ack(conn, + 1);
-				NET_DBG("FIN not yet acknowleged, going to CLOSING state");
-				if (th_ack(th) != conn->seq) {
-					/* Not acknowledged the FIN flag yet, so resend */
-					tcp_out_ext(conn, (FIN | ACK), NULL, conn->seq - 1);
-				} else {
-					tcp_out(conn, ACK);
-				}
-				next = TCP_CLOSING;
-				verdict = NET_OK;
-			} else if (th && FL(&fl, ==, ACK, th_ack(th) == conn->seq)) {
-				tcp_send_timer_cancel(conn);
-				next = TCP_FIN_WAIT_2;
-				verdict = NET_OK;
-				NET_DBG("FIN acknowledged, going to FIN_WAIT_2 state seq %u, ack %u"
-					, conn->seq, conn->ack);
 
-				/* Acknowledge any received data */
-				if (len > 0) {
-					tcp_out(conn, ACK);
-				}
-			} else if (th) {
-				NET_DBG("Staying in FIN_WAIT_1 flags 0x%x state seq %u, ack %u",
-					fl, conn->seq, conn->ack);
-				if (len > 0) {
+			/*
+			 * FIN2:
+			 * Only FIN is relevant in this state, as FIN has already acknowledged
+			 * -   -> TCP_FIN_WAIT_2
+			 * FIN -> TCP_TIME_WAIT
+			 */
+
+			/*
+			 * Closing:
+			 * Our FIN has to be acknowledged
+			 * -   -> TCP_CLOSING
+			 * ACK -> TCP_TIME_WAIT
+			 */
+			if (FL(&fl, &, ACK, th_ack(th) == conn->seq)) {
+				if (conn->state == TCP_FIN_WAIT_1) {
+					NET_DBG("FIN acknowledged, going to FIN_WAIT_2 "
+						"state seq %u, ack %u"
+						, conn->seq, conn->ack);
 					tcp_send_timer_cancel(conn);
-					/* Send out a duplicate ACK, with the pending FIN flag */
-					tcp_out(conn, FIN | ACK);
+					next = TCP_FIN_WAIT_2;
+				}
+				if (conn->state == TCP_CLOSING) {
+					NET_DBG("FIN acknowledged, going to TIME WAIT "
+						"state seq %u, ack %u"
+						, conn->seq, conn->ack);
+					tcp_send_timer_cancel(conn);
+					next = TCP_TIME_WAIT;
 				}
 				verdict = NET_OK;
 			}
-		}
-		break;
-	case TCP_FIN_WAIT_2:
-		/* Acknowledge but drop any data, but subtract any duplicate data */
-		if (th) {
-			if (len > 0) {
-				int32_t new_len = len - net_tcp_seq_cmp(conn->ack, th_seq(th));
+			if ((next == TCP_FIN_WAIT_2) ||
+			    (conn->state == TCP_FIN_WAIT_2) ||
+			    (conn->state == TCP_CLOSING)) {
 				/* Cases:
 				 * - Data already received earlier: len > 0 , new_len <= 0
 				 * - Partially new data len > 0, new_len > 0
@@ -2715,41 +2704,73 @@ next_state:
 				 *   between
 				 */
 				if (new_len > 0) {
-					conn_ack(conn, + new_len);
+					/* This should not happen, since we do not implement half
+					 * closed sockets since we are in sequence can send a reset
+					 * now
+					 */
+					NET_ERR("conn: %p, new bytes %u during FIN states "
+						"sending reset", conn, new_len);
+					net_stats_update_tcp_seg_drop(conn->iface);
+					tcp_out(conn, RST);
+					do_close = true;
+					close_status = -ECONNRESET;
+					break;
 				}
 			}
 
-			if (FL(&fl, ==, FIN, th_seq(th) == conn->ack) ||
-				   FL(&fl, ==, FIN | ACK, th_seq(th) == conn->ack) ||
-				   FL(&fl, ==, FIN | PSH | ACK,
-				      th_seq(th) == conn->ack)) {
-				/* Received FIN on FIN_WAIT_2, so cancel the timer */
-				k_work_cancel_delayable(&conn->fin_timer);
+			/*
+			 * There can also be data in the message, so compute with the length
+			 * of the packet to check with the ack
+			 */
+			if (FL(&fl, &, FIN, (th_seq(th) + len) == conn->ack)) {
+				if (conn->state != TCP_CLOSING) {
+					conn_ack(conn, + 1);
+				}
 
-				conn_ack(conn, + 1);
-				tcp_out(conn, ACK);
-				next = TCP_TIME_WAIT;
+				/* State path is dependent on if the acknowledge is in */
+				if ((next == TCP_FIN_WAIT_2) ||
+				    (conn->state == TCP_FIN_WAIT_2)) {
+					/* Already acknowledged, we can go further */
+					NET_DBG("FIN received, going to TIME WAIT");
+					tcp_send_timer_cancel(conn);
+					tcp_out(conn, ACK);
+					next = TCP_TIME_WAIT;
+				} else if (next != TCP_TIME_WAIT) {
+					/* FIN1 or CLOSING */
+					/* Not acknowledged the FIN flag yet, so resend */
+					tcp_out_ext(conn, (FIN | ACK), NULL, conn->seq - 1);
+					if (conn->state == TCP_FIN_WAIT_1) {
+						/* FIN not yet acknowleged, going to CLOSING state
+						 */
+						NET_DBG("FIN received, without acknowledge, "
+							"going to CLOSING state");
+						next = TCP_CLOSING;
+					}
+				}
 				verdict = NET_OK;
-			} else if (len > 0) {
-				/* Send out a duplicate ACK */
-				tcp_out(conn,  ACK);
-				verdict = NET_OK;
+			} else {
+				if (len > 0) {
+					if ((next == TCP_FIN_WAIT_2) ||
+					    (conn->state == TCP_FIN_WAIT_2)) {
+						/* Send out a duplicate ACK */
+						tcp_out(conn, ACK);
+					} else {
+						/* In FIN1 or CLOSING state
+						 * Send out a duplicate ACK, with the pending FIN
+						 * flag
+						 */
+						tcp_out_ext(conn, FIN | ACK, NULL, conn->seq - 1);
+					}
+					verdict = NET_OK;
+				}
 			}
-		}
-		break;
-	case TCP_CLOSING:
-		if (th && FL(&fl, ==, ACK, th_seq(th) == conn->ack)) {
-			tcp_send_timer_cancel(conn);
-			next = TCP_TIME_WAIT;
-			verdict = NET_OK;
 		}
 		break;
 	case TCP_TIME_WAIT:
 		/* Acknowledge any FIN attempts, in case retransmission took
 		 * place.
 		 */
-		if (th && (FL(&fl, ==, (FIN | ACK), th_seq(th) + 1 == conn->ack) ||
-			   FL(&fl, ==, FIN, th_seq(th) + 1 == conn->ack))) {
+		if (th && FL(&fl, &, FIN, th_seq(th) + 1 == conn->ack)) {
 			tcp_out(conn, ACK);
 			verdict = NET_OK;
 		}
